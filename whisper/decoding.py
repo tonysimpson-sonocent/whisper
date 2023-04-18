@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -469,7 +469,12 @@ class ApplyTimestampRules(LogitFilter):
             ]
             if timestamps.numel() > 0:
                 # timestamps shouldn't decrease; forbid timestamp tokens smaller than the last
-                logits[k, self.tokenizer.timestamp_begin : timestamps[-1]] = -np.inf
+                # also force each segment to have a nonzero length, to prevent infinite looping
+                if last_was_timestamp and not penultimate_was_timestamp:
+                    timestamp_last = timestamps[-1]
+                else:
+                    timestamp_last = timestamps[-1] + 1
+                logits[k, self.tokenizer.timestamp_begin : timestamp_last] = -np.inf
 
         if tokens.shape[1] == self.sample_begin:
             # suppress generating non-timestamp tokens at the beginning
@@ -778,7 +783,10 @@ class DecodingTask:
 
 @torch.no_grad()
 def decode(
-    model: "Whisper", mel: Tensor, options: DecodingOptions = DecodingOptions()
+    model: "Whisper",
+    mel: Tensor,
+    options: DecodingOptions = DecodingOptions(),
+    **kwargs,
 ) -> Union[DecodingResult, List[DecodingResult]]:
     """
     Performs decoding of 30-second audio segment(s), provided as Mel spectrogram(s).
@@ -801,6 +809,9 @@ def decode(
     """
     if single := mel.ndim == 2:
         mel = mel.unsqueeze(0)
+
+    if kwargs:
+        options = replace(options, **kwargs)
 
     result = DecodingTask(model, options).run(mel)
 

@@ -200,14 +200,14 @@ def transcribe(
     def new_segment(
         *, start: float, end: float, tokens: torch.Tensor, result: DecodingResult
     ):
-        text_tokens = [token for token in tokens.tolist() if token < tokenizer.eot]
+        tokens = tokens.tolist()
+        text_tokens = [token for token in tokens if token < tokenizer.eot]
         return {
-            "id": len(all_segments),
             "seek": seek,
             "start": start,
             "end": end,
             "text": tokenizer.decode(text_tokens),
-            "tokens": text_tokens,
+            "tokens": tokens,
             "temperature": result.temperature,
             "avg_logprob": result.avg_logprob,
             "compression_ratio": result.compression_ratio,
@@ -245,7 +245,6 @@ def transcribe(
 
             previous_seek = seek
             current_segments = []
-            current_tokens = []
 
             timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
             single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
@@ -275,7 +274,6 @@ def transcribe(
                             result=result,
                         )
                     )
-                    current_tokens.append(sliced_tokens.tolist())
                     last_slice = current_slice
 
                 if single_timestamp_ending:
@@ -287,7 +285,6 @@ def transcribe(
                         tokens[last_slice - 1].item() - tokenizer.timestamp_begin
                     )
                     seek += last_timestamp_pos * input_stride
-                all_tokens.extend(tokens[: last_slice + 1].tolist())
             else:
                 duration = segment_duration
                 timestamps = tokens[timestamp_tokens.nonzero().flatten()]
@@ -309,7 +306,6 @@ def transcribe(
                         result=result,
                     )
                 )
-                current_tokens.append(tokens.tolist())
                 seek += segment_size
 
             if not condition_on_previous_text or result.temperature > 0.5:
@@ -348,11 +344,17 @@ def transcribe(
                     segment["text"] = ""
                     segment["tokens"] = []
                     segment["words"] = []
-                    current_tokens[i] = []
 
-            all_segments.extend(current_segments)
+            all_segments.extend(
+                [
+                    {"id": i, **segment}
+                    for i, segment in enumerate(
+                        current_segments, start=len(all_segments)
+                    )
+                ]
+            )
             all_tokens.extend(
-                [token for segment in current_tokens for token in segment]
+                [token for segment in current_segments for token in segment["tokens"]]
             )
 
             # update progress bar
@@ -399,6 +401,9 @@ def cli():
     parser.add_argument("--word_timestamps", type=str2bool, default=False, help="(experimental) extract word-level timestamps and refine the results based on them")
     parser.add_argument("--prepend_punctuations", type=str, default="\"\'“¿([{-", help="if word_timestamps is True, merge these punctuation symbols with the next word")
     parser.add_argument("--append_punctuations", type=str, default="\"\'.。,，!！?？:：”)]}、", help="if word_timestamps is True, merge these punctuation symbols with the previous word")
+    parser.add_argument("--highlight_words", type=str2bool, default=False, help="(requires --word_timestamps True) underline each word as it is spoken in srt and vtt")
+    parser.add_argument("--max_line_width", type=optional_int, default=None, help="(requires --word_timestamps True) the maximum number of characters in a line before breaking the line")
+    parser.add_argument("--max_line_count", type=optional_int, default=None, help="(requires --word_timestamps True) the maximum number of lines in a segment")
     parser.add_argument("--threads", type=optional_int, default=0, help="number of threads used by torch for CPU inference; supercedes MKL_NUM_THREADS/OMP_NUM_THREADS")
     # fmt: on
 
@@ -431,9 +436,17 @@ def cli():
     model = load_model(model_name, device=device, download_root=model_dir)
 
     writer = get_writer(output_format, output_dir)
+    word_options = ["highlight_words", "max_line_count", "max_line_width"]
+    if not args["word_timestamps"]:
+        for option in word_options:
+            if args[option]:
+                parser.error(f"--{option} requires --word_timestamps True")
+    if args["max_line_count"] and not args["max_line_width"]:
+        warnings.warn("--max_line_count has no effect without --max_line_width")
+    writer_args = {arg: args.pop(arg) for arg in word_options}
     for audio_path in args.pop("audio"):
         result = transcribe(model, audio_path, temperature=temperature, **args)
-        writer(result, audio_path)
+        writer(result, audio_path, writer_args)
 
 
 if __name__ == "__main__":
